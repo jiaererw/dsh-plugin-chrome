@@ -9,26 +9,27 @@
  *  - file reads accept bare file names only (no traversal);
  *  - the WebSocket handshake validates sessionId the same way.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { URL } from 'node:url'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { WebSocketServer, WebSocket } from 'ws'
-import type { ClientWsMessage, ChromeEventDetail, ChromeStatus, HostWsMessage, ScreenshotEntry } from '../shared/contract.ts'
+import type { ClientWsMessage, ChromeEventDetail, HostWsMessage } from '../shared/contract.ts'
 import { API_PREFIX, WS_PATH } from '../shared/contract.ts'
 import type { ChromeManager, SessionChrome } from './manager.ts'
-import { NAV_TIMEOUT_MS } from './actions.ts'
+import { NAV_TIMEOUT_MS, normalizeUrl } from './actions.ts'
+import { screenshotHistory, SHOT_NAME_RE } from './shots.ts'
 
 /** sessionId whitelist: DSH session ids are `session-<uuid>`; keep it strict. */
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/u
 
-/** Screenshot file-name whitelist (no separators, no traversal). */
-const SHOT_NAME_RE = /^shot-[0-9]+-[A-Za-z0-9_-]{0,64}\.(png|jpeg|jpg)$/u
-
 /** JSON body cap (all payloads are small control messages). */
 const MAX_BODY_BYTES = 64 * 1024
+
+/** Collapse bursts of change events into one trailing status push. */
+const STATUS_BROADCAST_DEBOUNCE_MS = 120
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const data = JSON.stringify(body)
@@ -77,6 +78,19 @@ function assertSameOrigin(req: IncomingMessage): void {
   if (originHost !== host) throw new Error('跨站请求已拒绝')
 }
 
+/**
+ * Reject cross-site reads. Modern browsers tag every request with
+ * Sec-Fetch-Site; `cross-site` means an attacker page (or a cross-site
+ * <img>/<script>) is hitting the loopback API, which should only ever serve
+ * the same-origin Web GUI. Requests without the header (curl, older
+ * clients) still pass — this is a hardening layer, not the whole gate.
+ */
+function assertNotCrossSite(req: IncomingMessage): void {
+  if (String(req.headers['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site') {
+    throw new Error('跨站请求已拒绝')
+  }
+}
+
 /** Validate and return a sessionId from query or body. */
 function requireSessionId(value: unknown, label: string): string {
   if (typeof value !== 'string' || !SESSION_ID_RE.test(value) || value.length > 128) {
@@ -85,52 +99,37 @@ function requireSessionId(value: unknown, label: string): string {
   return value
 }
 
-/** Latest screenshot file name in a session dir (or null). */
-function latestScreenshot(session: SessionChrome): string | null {
-  try {
-    const files = readdirSync(session.screenshotsDir)
-      .filter((name) => SHOT_NAME_RE.test(name))
-      .map((name) => ({ name, mtime: statSync(join(session.screenshotsDir, name)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime)
-    return files[0]?.name ?? null
-  } catch {
-    return null
-  }
-}
-
-/** Screenshot history (newest first, capped at 50 entries). */
-function screenshotHistory(session: SessionChrome): ScreenshotEntry[] {
-  try {
-    return readdirSync(session.screenshotsDir)
-      .filter((name) => SHOT_NAME_RE.test(name))
-      .map((name) => {
-        const full = join(session.screenshotsDir, name)
-        const info = statSync(full)
-        return { name, createdAt: info.mtimeMs, bytes: info.size, width: 0, height: 0, fullPage: false, pageTitle: '', url: '' }
-      })
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, 50)
-  } catch {
-    return []
-  }
-}
-
-/** Merge live state + disk facts into the status DTO. */
-async function statusOf(session: SessionChrome, manager: ChromeManager): Promise<ChromeStatus> {
-  const status = await session.status()
-  status.lastScreenshot = latestScreenshot(session)
-  if (status.running) {
-    status.idleDeadline = session.idleDeadlineMs(manager.config.idleTimeoutMs)
-  }
-  return status
-}
-
 /** Install the HTTP routes and the screencast WebSocket. */
 export function installApi(webCtx: Context, manager: ChromeManager): () => void {
   /** Live viewer sockets per session (screencast + status fan-out). */
   const viewers = new Map<string, Set<WebSocket>>()
   /** Sessions whose pushers are wired to the fan-out below. */
   const wired = new Set<SessionChrome>()
+
+  const broadcastStatus = (session: SessionChrome): void => {
+    const sockets = viewers.get(session.sessionId)
+    if (sockets === undefined || sockets.size === 0) return
+    void session.status().then((status) => {
+      const message: HostWsMessage = { type: 'status', status }
+      const data = JSON.stringify(message)
+      for (const socket of sockets) {
+        if (socket.readyState === WebSocket.OPEN) socket.send(data)
+      }
+    })
+  }
+
+  /** Debounced status fan-out: event bursts collapse into one push. */
+  const statusTimers = new Map<SessionChrome, ReturnType<typeof setTimeout>>()
+  const scheduleStatus = (session: SessionChrome): void => {
+    const pending = statusTimers.get(session)
+    if (pending !== undefined) clearTimeout(pending)
+    const timer = setTimeout(() => {
+      statusTimers.delete(session)
+      broadcastStatus(session)
+    }, STATUS_BROADCAST_DEBOUNCE_MS)
+    timer.unref?.()
+    statusTimers.set(session, timer)
+  }
 
   const wire = (session: SessionChrome): void => {
     if (wired.has(session)) return
@@ -145,7 +144,7 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
       }
     }
     session.onEvent = (detail: ChromeEventDetail) => {
-      broadcastStatus(session)
+      scheduleStatus(session)
       const sockets = viewers.get(session.sessionId)
       if (sockets === undefined || sockets.size === 0) return
       const message: HostWsMessage = { type: 'event', detail }
@@ -156,23 +155,12 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
     }
   }
 
-  const broadcastStatus = (session: SessionChrome): void => {
-    const sockets = viewers.get(session.sessionId)
-    if (sockets === undefined || sockets.size === 0) return
-    void statusOf(session, manager).then((status) => {
-      const message: HostWsMessage = { type: 'status', status }
-      const data = JSON.stringify(message)
-      for (const socket of sockets) {
-        if (socket.readyState === WebSocket.OPEN) socket.send(data)
-      }
-    })
-  }
-
   const disposeHttp = webCtx.webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
     handler: async (req, res) => {
       try {
+        assertNotCrossSite(req)
         const url = new URL(req.url ?? '/', 'http://localhost')
         const path = url.pathname
 
@@ -188,7 +176,7 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
             return
           }
           wire(session)
-          sendJson(res, 200, await statusOf(session, manager))
+          sendJson(res, 200, await session.status())
           return
         }
 
@@ -200,7 +188,7 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
             sendJson(res, 200, { entries: [] })
             return
           }
-          sendJson(res, 200, { entries: screenshotHistory(session) })
+          sendJson(res, 200, { entries: screenshotHistory(session.screenshotsDir) })
           return
         }
 
@@ -217,7 +205,13 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
             sendJson(res, 404, { error: '会话无 Chrome 窗口' })
             return
           }
-          const buffer = readFileSync(join(session.screenshotsDir, name))
+          let buffer: Buffer
+          try {
+            buffer = await readFile(join(session.screenshotsDir, name))
+          } catch {
+            sendJson(res, 404, { error: '截图文件不存在' })
+            return
+          }
           const type = name.endsWith('.png') ? 'image/png' : 'image/jpeg'
           res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache', 'Content-Length': buffer.length })
           res.end(buffer)
@@ -232,7 +226,7 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
         if (req.method === 'POST' && path === `${API_PREFIX}/open`) {
           const session = await manager.getOrLaunch(sessionId, typeof body.url === 'string' ? body.url : undefined)
           wire(session)
-          sendJson(res, 200, { ok: true, status: await statusOf(session, manager) })
+          sendJson(res, 200, { ok: true, status: await session.status() })
           return
         }
 
@@ -250,7 +244,7 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
             if (page === undefined) throw new Error('没有可用的标签页。')
             await page.reload({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS })
           })
-          sendJson(res, 200, { ok: true, status: await statusOf(session, manager) })
+          sendJson(res, 200, { ok: true, status: await session.status() })
           return
         }
 
@@ -268,15 +262,14 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
             if (action === 'goto') {
               const target = String(body.url ?? '')
               if (target.trim() === '') throw new Error('goto 需要 url')
-              const normalized = /^[a-z][a-z0-9+.-]*:/iu.test(target) ? target : `https://${target}`
-              await page.goto(normalized, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS })
+              await page.goto(normalizeUrl(target), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS })
             } else if (action === 'back') {
               await page.goBack({ timeout: NAV_TIMEOUT_MS }).catch(() => page.goBack())
             } else {
               await page.goForward({ timeout: NAV_TIMEOUT_MS }).catch(() => page.goForward())
             }
           })
-          sendJson(res, 200, { ok: true, status: await statusOf(session, manager) })
+          sendJson(res, 200, { ok: true, status: await session.status() })
           return
         }
 
@@ -291,27 +284,18 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
               return
             }
             if (action === 'close') {
-              const pages = await session.browser.pages()
               const index = typeof body.index === 'number' ? body.index : session.selectedIndex
-              if (index < 0 || index >= pages.length) throw new Error(`标签页序号 ${index} 不存在`)
-              await pages[index].close().catch(() => {})
+              await session.closeTab(index)
               return
             }
             if (action === 'new') {
-              const page = await session.browser.newPage()
-              if (typeof body.url === 'string' && body.url.trim() !== '') {
-                const target = body.url
-                const normalized = /^[a-z][a-z0-9+.-]*:/iu.test(target) ? target : `https://${target}`
-                await page.goto(normalized, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => {})
-              }
-              const pages = await session.browser.pages()
-              session.selectedIndex = pages.length - 1
-              await page.bringToFront().catch(() => {})
+              const url = typeof body.url === 'string' && body.url.trim() !== '' ? body.url : undefined
+              await session.newTab(url)
               return
             }
             throw new Error('action 必须是 list/select/close/new')
           })
-          sendJson(res, 200, { ok: true, status: await statusOf(session, manager) })
+          sendJson(res, 200, { ok: true, status: await session.status() })
           return
         }
 
@@ -344,7 +328,7 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
     const session = manager.get(sessionId)
     if (session !== undefined) {
       wire(session)
-      void statusOf(session, manager).then((status) => {
+      void session.status().then((status) => {
         if (socket.readyState !== WebSocket.OPEN) return
         const welcome: HostWsMessage = { type: 'welcome', status }
         socket.send(JSON.stringify(welcome))
@@ -378,6 +362,12 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
   const disposeUpgrade = webCtx.webServer.registerUpgrade({
     path: WS_PATH,
     handler: (req, socket, head) => {
+      // Same cross-site hardening as the HTTP reads (Sec-Fetch-Site).
+      if (String(req.headers['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site') {
+        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+        socket.destroy()
+        return
+      }
       wss.handleUpgrade(req, socket, head, (ws) => {
         wss.emit('connection', ws, req)
       })
@@ -387,6 +377,8 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
   return () => {
     disposeHttp()
     disposeUpgrade()
+    for (const timer of statusTimers.values()) clearTimeout(timer)
+    statusTimers.clear()
     for (const sockets of viewers.values()) {
       for (const socket of sockets) socket.close(1001, 'plugin unloaded')
     }

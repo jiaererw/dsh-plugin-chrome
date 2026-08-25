@@ -15,11 +15,27 @@ import type { ChromeEventDetail, ChromeStatus, PageInfo } from '../shared/contra
 import { SCREENSHOTS_DIR, SESSIONS_DIR } from '../shared/contract.ts'
 import type { UidEntry } from './snapshot.ts'
 import { closeBrowserHard, findBrowser, forceWindowVisible, launchBrowser, launchOptions } from './browser.ts'
-import { captureScreenshot } from './actions.ts'
+import { captureScreenshot, navigate, NAV_TIMEOUT_MS, normalizeUrl } from './actions.ts'
+import { latestScreenshot } from './shots.ts'
 import type { ResolvedConfig } from './config.ts'
 
 /** Internal Chrome-internal pages never shown or controlled. */
 const INTERNAL_URL_RE = /^(chrome|chrome-extension|devtools|edge|view-source):/iu
+
+/** Welcome page shown in a freshly launched window (data: URL). */
+function welcomePage(sessionId: string): string {
+  const short = sessionId.slice(0, 8)
+  const body = [
+    '<title>DSH Chrome</title>',
+    '<body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#1e1e2e;color:#cdd6f4">',
+    '<div style="text-align:center">',
+    '<h1>🌐 DSH Chrome</h1>',
+    `<p>会话 ${short} 的专属浏览器窗口</p>`,
+    '<p style="opacity:.6">Agent 的操作会实时显示在这里</p>',
+    '</div></body>',
+  ]
+  return `data:text/html,${body.join('')}`
+}
 
 /** Heartbeat tick: how often the stall watchdog checks for a silent stream. */
 const FRAME_HEARTBEAT_MS = 2000
@@ -113,10 +129,47 @@ export class SessionChrome {
     const existing = await this.selected()
     if (existing !== undefined) return existing
     const fresh = await this.browser.newPage()
-    const pages = await this.browser.pages()
-    this.selectedIndex = pages.length - 1
+    // selectedIndex indexes the FILTERED pages list everywhere; find the
+    // fresh tab there (about:blank always passes the filter).
+    const filtered = await this.pages()
+    const idx = filtered.indexOf(fresh)
+    this.selectedIndex = idx >= 0 ? idx : filtered.length - 1
     await fresh.bringToFront().catch(() => {})
     return fresh
+  }
+
+  /** Open a new tab (optionally navigating it) and select it. */
+  async newTab(url?: string): Promise<Page> {
+    const page = await this.browser.newPage()
+    if (url !== undefined && url.trim() !== '') {
+      try {
+        await navigate(page, url, NAV_TIMEOUT_MS)
+      } catch (error) {
+        await page.close().catch(() => {})
+        throw error
+      }
+    }
+    const filtered = await this.pages()
+    const idx = filtered.indexOf(page)
+    this.selectedIndex = idx >= 0 ? idx : filtered.length - 1
+    await page.bringToFront().catch(() => {})
+    this.notify({ kind: 'page-selected', index: this.selectedIndex })
+    return page
+  }
+
+  /** Close a tab by (filtered) index; re-selects a neighbor when needed. */
+  async closeTab(index: number): Promise<void> {
+    const pages = await this.pages()
+    if (index < 0 || index >= pages.length) {
+      throw new Error(`标签页序号 ${index} 不存在（当前共 ${pages.length} 个）。`)
+    }
+    const wasSelected = index === this.selectedIndex
+    await pages[index].close().catch(() => {})
+    this.notify({ kind: 'page-removed', index })
+    if (wasSelected) {
+      this.selectedIndex = Math.max(0, Math.min(index, (await this.pages()).length - 1))
+      await this.selectPage(this.selectedIndex)
+    }
   }
 
   /**
@@ -173,8 +226,12 @@ export class SessionChrome {
         screencastActive: false, error: this.exited ? '浏览器进程已退出' : null,
       }
     }
-    const live = await this.browser.pages()
-    for (const page of live) {
+    // The filtered list is the one index contract the whole plugin shares:
+    // internal chrome:// pages are never shown or controlled, and every
+    // index (status, tools, API) counts within this list.
+    const live = await this.pages()
+    for (let index = 0; index < live.length; index += 1) {
+      const page = live[index]
       let url = ''
       let title = ''
       try {
@@ -183,7 +240,7 @@ export class SessionChrome {
       } catch {
         // A tab mid-teardown answers neither; report it as inert.
       }
-      pages.push({ index: live.indexOf(page), url, title, active: live.indexOf(page) === this.selectedIndex, selected: live.indexOf(page) === this.selectedIndex })
+      pages.push({ index, url, title, active: index === this.selectedIndex, selected: index === this.selectedIndex })
     }
     return {
       sessionId: this.sessionId,
@@ -191,8 +248,8 @@ export class SessionChrome {
       pages,
       startedAt: this.startedAt,
       lastUsedAt: this.lastUsedAt,
-      idleDeadline: null, // computed by the manager (config-aware)
-      lastScreenshot: null, // filled by the API layer from disk state
+      idleDeadline: this.idleDeadlineMs(this.config.idleTimeoutMs),
+      lastScreenshot: latestScreenshot(this.screenshotsDir),
       screencastActive: this.screencastWatchers.size > 0,
       error: null,
     }
@@ -395,15 +452,16 @@ export class ChromeManager {
       await forceWindowVisible(browser)
       // Navigate the default tab to the requested URL (or a welcome page).
       // Adopted windows keep whatever tabs the previous host left behind;
-      // a bare new launch gets the welcome page.
+      // a bare new launch gets the welcome page. User/model URLs go through
+      // normalizeUrl (https:// defaulting, dangerous-scheme rejection).
       if (!adopted) {
         const page = (await browser.pages())[0]
         if (page !== undefined) {
-          const target = url ?? `data:text/html,<title>DSH Chrome</title><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#1e1e2e;color:#cdd6f4"><div style="text-align:center"><h1>🌐 DSH Chrome</h1><p>会话 ${sessionId.slice(0, 8)} 的专属浏览器窗口</p><p style="opacity:.6">Agent 的操作会实时显示在这里</p></div></body>`
+          const target = url !== undefined ? normalizeUrl(url) : welcomePage(sessionId)
           await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
         }
       } else if (url !== undefined) {
-        await session.ensurePage().then((page) => page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })).catch(() => {})
+        await session.ensurePage().then((page) => page.goto(normalizeUrl(url), { waitUntil: 'domcontentloaded', timeout: 15000 })).catch(() => {})
       }
       session.notify({ kind: 'opened' })
       return session

@@ -15,6 +15,22 @@ export const NAV_TIMEOUT_MS = 30000
 /** Default wait timeout for chrome_wait. */
 export const WAIT_TIMEOUT_MS = 15000
 
+/** Schemes never passed to navigation (classic script-injection vectors). */
+const BLOCKED_URL_SCHEMES = /^(javascript|vbscript):/iu
+
+/**
+ * Normalize a user/model-supplied URL: bare hostnames get https://, already
+ * schemed URLs pass through (http/https/data/about/file/…), and classic
+ * script-vector schemes are rejected outright.
+ */
+export function normalizeUrl(url: string): string {
+  const trimmed = url.trim()
+  if (BLOCKED_URL_SCHEMES.test(trimmed)) {
+    throw new Error(`已阻止不安全的 URL 协议：${trimmed.slice(0, 40)}`)
+  }
+  return /^[a-z][a-z0-9+.-]*:/iu.test(trimmed) ? trimmed : `https://${trimmed}`
+}
+
 /** A fresh CDP session for one page (input + DOM domains). */
 export async function cdpSession(page: Page): Promise<CDPSession> {
   const session = await page.target().createCDPSession()
@@ -90,9 +106,11 @@ export async function hoverUid(session: CDPSession, backendNodeId: number): Prom
  */
 export async function fillUid(page: Page, session: CDPSession, backendNodeId: number, value: string): Promise<void> {
   await clickUid(page, session, backendNodeId, false)
-  await page.keyboard.down('Control')
+  // Select-all modifier differs per platform: Meta on macOS, Control elsewhere.
+  const modifier = process.platform === 'darwin' ? 'Meta' : 'Control'
+  await page.keyboard.down(modifier)
   await page.keyboard.press('KeyA')
-  await page.keyboard.up('Control')
+  await page.keyboard.up(modifier)
   await session.send('Input.insertText', { text: value })
   await waitForQuiescence(page)
 }
@@ -214,12 +232,16 @@ export async function captureScreenshot(page: Page, opts: {
   }
   // Element-free captures: measure the viewport or the full document first,
   // then capture. Measurement must not scroll (screenshot re-scrolls itself).
+  // With defaultViewport: null, page.viewport() is null, so the viewport
+  // size must come from the page itself (window.innerWidth/Height).
   const size = await page.evaluate(() => ({
-    width: document.documentElement.scrollWidth || document.body?.scrollWidth || window.innerWidth,
-    height: document.documentElement.scrollHeight || document.body?.scrollHeight || window.innerHeight,
+    scrollWidth: document.documentElement.scrollWidth || document.body?.scrollWidth || window.innerWidth,
+    scrollHeight: document.documentElement.scrollHeight || document.body?.scrollHeight || window.innerHeight,
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
   }))
-  const width = opts.fullPage ? Math.max(1, size.width) : page.viewport()?.width ?? 1280
-  const height = opts.fullPage ? Math.max(1, size.height) : page.viewport()?.height ?? 720
+  const width = opts.fullPage ? Math.max(1, size.scrollWidth) : Math.max(1, size.innerWidth)
+  const height = opts.fullPage ? Math.max(1, size.scrollHeight) : Math.max(1, size.innerHeight)
   const buf = await page.screenshot({
     type: opts.format,
     quality: opts.format === 'jpeg' ? opts.quality : undefined,
@@ -230,7 +252,6 @@ export async function captureScreenshot(page: Page, opts: {
 
 /** Navigate the page (goto with permissive load gate). */
 export async function navigate(page: Page, url: string, timeoutMs: number): Promise<void> {
-  const normalized = /^[a-z][a-z0-9+.-]*:/iu.test(url) ? url : `https://${url}`
-  await page.goto(normalized, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  await page.goto(normalizeUrl(url), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await waitForQuiescence(page)
 }

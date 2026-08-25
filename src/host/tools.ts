@@ -20,7 +20,8 @@ import {
 import type { ResolvedConfig } from './config.ts'
 import type { ChromeManager, SessionChrome } from './manager.ts'
 import { resolveUid, snapshotPage } from './snapshot.ts'
-import type { ChromeStatus, PageInfo } from '../shared/contract.ts'
+import { appendShot } from './shots.ts'
+import type { ChromeStatus, PageInfo, ScreenshotEntry } from '../shared/contract.ts'
 
 /** Dependency bundle threaded through every tool factory. */
 export interface ToolDeps {
@@ -236,46 +237,25 @@ function tabsTool(deps: ToolDeps): ReturnType<typeof defineTool> {
       const sessionId = sessionIdOf(exec)
       const { session } = await resolveTarget(deps.manager, sessionId)
       return session.run(async () => {
-        const browser = session.browser
-        const pages = await browser.pages()
         if (args.action === 'list') {
           const status = await session.status()
           return { text: formatStatus(status) }
         }
         if (args.action === 'new') {
-          if (pages.length >= deps.config.maxTabs) {
+          if ((await session.pages()).length >= deps.config.maxTabs) {
             throw new Error(`标签页数量已达上限 ${deps.config.maxTabs}，请先关闭不用的标签页。`)
           }
-          const page = await browser.newPage()
-          if (args.url !== undefined && args.url !== '') {
-            await navigate(page, args.url, NAV_TIMEOUT_MS).catch(async (error: unknown) => {
-              await page.close().catch(() => {})
-              throw error
-            })
-          }
-          const index = (await browser.pages()).length - 1
-          session.selectedIndex = index
-          session.notify({ kind: 'page-selected', index })
-          return { text: `已新建标签页 [${index}]。` }
+          await session.newTab(args.url !== undefined && args.url !== '' ? args.url : undefined)
+          return { text: `已新建标签页 [${session.selectedIndex}]。` }
         }
         const index = args.index ?? session.selectedIndex
-        if (index < 0 || index >= pages.length) {
-          throw new Error(`标签页序号 ${index} 不存在（当前共 ${pages.length} 个）。`)
-        }
         if (args.action === 'select') {
           await session.selectPage(index)
           const page = await session.selected()
           return { text: `已切换到标签页 [${index}]：${page !== undefined ? await page.title().catch(() => '') : ''}` }
         }
         // close
-        const closing = pages[index]
-        const wasSelected = index === session.selectedIndex
-        await closing.close().catch(() => {})
-        session.notify({ kind: 'page-removed', index })
-        if (wasSelected) {
-          session.selectedIndex = Math.max(0, Math.min(index, (await browser.pages()).length - 1))
-          await session.selectPage(session.selectedIndex)
-        }
+        await session.closeTab(index)
         return { text: `已关闭标签页 [${index}]。` }
       })
     },
@@ -385,6 +365,12 @@ function screenshotTool(deps: ToolDeps): ReturnType<typeof defineTool> {
         writeFileSync(path, buffer)
         const title = await page.title().catch(() => '')
         const url = page.url()
+        const entry: ScreenshotEntry = {
+          name, createdAt: Date.now(), bytes: buffer.length, width, height,
+          fullPage: args.fullPage === true, pageTitle: title, url,
+        }
+        // Persist metadata so the Web GUI history survives restarts.
+        appendShot(session.screenshotsDir, entry)
         let attachment: ImageAttachmentRef | undefined
         if (deps.attachImage !== undefined) {
           try {
@@ -393,10 +379,7 @@ function screenshotTool(deps: ToolDeps): ReturnType<typeof defineTool> {
             attachment = undefined // attachment service rejected it; the file path still works
           }
         }
-        session.notify({
-          kind: 'screenshot',
-          entry: { name, createdAt: Date.now(), bytes: buffer.length, width, height, fullPage: args.fullPage === true, pageTitle: title, url },
-        })
+        session.notify({ kind: 'screenshot', entry })
         return {
           path, name, width, height, bytes: buffer.length, mediaType,
           pageTitle: title, url,

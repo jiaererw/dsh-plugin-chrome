@@ -14,7 +14,7 @@
 - **实时画面流**：Web GUI「Chrome」标签页通过 Chrome screencast 实时显示页面画面（页面活跃时秒级流畅）；页面静止时由心跳兜底强制截帧（约 3 秒一帧），画面不会冻结。
 - **完整的 Agent 工具集**（16 个工具）：`chrome_open` / `chrome_status` / `chrome_close` / `chrome_navigate` / `chrome_tabs` / `chrome_snapshot` / `chrome_screenshot` / `chrome_click` / `chrome_click_at` / `chrome_fill` / `chrome_type` / `chrome_press_key` / `chrome_hover` / `chrome_scroll` / `chrome_evaluate` / `chrome_wait`。
 - **无障碍树快照**：`chrome_snapshot` 输出紧凑的 a11y 树 + 稳定元素 uid，点击/填充直接按 uid 定位，比裸 DOM 省 token、抗脆弱选择器。
-- **截图双通道**：`chrome_screenshot` 的图片既进模型上下文（图片块），也保存到会话截图目录并展示在面板里。
+- **截图双通道**：`chrome_screenshot` 的图片既进模型上下文（图片块），也保存到会话截图目录并展示在面板里；历史记录带标题/URL/尺寸元数据，重启后仍在。
 - **安全设计**：CDP 不暴露固定端口；Web API 同源校验 + sessionId 白名单；浏览器数据按会话隔离。
 - **资源治理**：空闲自动关闭（默认 10 分钟，可配置），`chrome_close` 显式关闭，插件卸载/宿主退出时全部收尾。
 
@@ -73,7 +73,6 @@ Agent 会：`chrome_open` → `chrome_navigate` → `chrome_screenshot`（看图
     screencastQuality: 70      # JPEG 质量 1-100
     maxSnapshotText: 60000     # 单次快照最大字符数
     maxTabs: 16
-    autoScreenshot: false      # 每次操作后自动截图
     extraArgs: ''              # 追加的 Chrome 启动参数
 ```
 
@@ -94,7 +93,7 @@ npm install
 npm run typecheck   # host + client 两个 program
 npm test            # vitest 单测
 npm run test:e2e    # 真实 Chrome 端到端冒烟（会弹出可见窗口）
-npm run build       # lib/index.js（host）+ lib/client.js（client bundle）
+npm run build       # lib/index.js + lib/index.d.ts（host）、lib/client.js + lib/client.d.ts（client bundle）
 npm run watch       # 开发时持续构建；client 变更经 HMR 热更，host 变更需重启 DSH
 ```
 

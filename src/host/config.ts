@@ -45,24 +45,36 @@ export interface Config {
   maxSnapshotText?: number
   /** Maximum tabs a session window may open. */
   maxTabs?: number
-  /** Whether the host also records page screenshots after every action. */
-  autoScreenshot?: boolean
 }
 
-/** Loader-validated config schema; defaults live here. */
+/** Single source of truth for defaults (schema + resolver). */
+const DEFAULTS = {
+  executablePath: '',
+  headless: false,
+  dataRoot: '',
+  idleTimeoutMs: 600000,
+  windowWidth: 1280,
+  windowHeight: 900,
+  extraArgs: '',
+  screencastFrameSkip: 4,
+  screencastQuality: 70,
+  maxSnapshotText: 60000,
+  maxTabs: 16,
+} as const satisfies Record<keyof Config, string | number | boolean>
+
+/** Loader-validated config schema; defaults come from {@link DEFAULTS}. */
 export const Config: z<Config> = z.object({
-  executablePath: z.string().default(''),
-  headless: z.boolean().default(false),
-  dataRoot: z.string().default(''),
-  idleTimeoutMs: z.number().min(0).default(600000),
-  windowWidth: z.number().min(0).default(1280),
-  windowHeight: z.number().min(0).default(900),
-  extraArgs: z.string().default(''),
-  screencastFrameSkip: z.number().min(1).default(4),
-  screencastQuality: z.number().min(1).max(100).default(70),
-  maxSnapshotText: z.number().min(1000).default(60000),
-  maxTabs: z.number().min(1).default(16),
-  autoScreenshot: z.boolean().default(false),
+  executablePath: z.string().default(DEFAULTS.executablePath),
+  headless: z.boolean().default(DEFAULTS.headless),
+  dataRoot: z.string().default(DEFAULTS.dataRoot),
+  idleTimeoutMs: z.number().min(0).default(DEFAULTS.idleTimeoutMs),
+  windowWidth: z.number().min(0).default(DEFAULTS.windowWidth),
+  windowHeight: z.number().min(0).default(DEFAULTS.windowHeight),
+  extraArgs: z.string().default(DEFAULTS.extraArgs),
+  screencastFrameSkip: z.number().min(1).default(DEFAULTS.screencastFrameSkip),
+  screencastQuality: z.number().min(1).max(100).default(DEFAULTS.screencastQuality),
+  maxSnapshotText: z.number().min(1000).default(DEFAULTS.maxSnapshotText),
+  maxTabs: z.number().min(1).default(DEFAULTS.maxTabs),
 })
 
 /** Resolved shape after the Loader applies schema defaults. */
@@ -73,17 +85,16 @@ export type ResolvedConfig = {
 /** Resolve a (possibly partial) raw config into a complete value. */
 export function resolveConfig(raw: Partial<Config> = {}): ResolvedConfig {
   return {
-    executablePath: raw.executablePath ?? '',
-    headless: raw.headless ?? false,
-    dataRoot: raw.dataRoot ?? '',
-    idleTimeoutMs: raw.idleTimeoutMs ?? 600000,
-    windowWidth: raw.windowWidth ?? 1280,
-    windowHeight: raw.windowHeight ?? 900,
-    extraArgs: raw.extraArgs ?? '',
-    screencastFrameSkip: raw.screencastFrameSkip ?? 4,
-    screencastQuality: raw.screencastQuality ?? 70,
-    maxSnapshotText: raw.maxSnapshotText ?? 60000,
-    maxTabs: raw.maxTabs ?? 16,
-    autoScreenshot: raw.autoScreenshot ?? false,
+    executablePath: raw.executablePath ?? DEFAULTS.executablePath,
+    headless: raw.headless ?? DEFAULTS.headless,
+    dataRoot: raw.dataRoot ?? DEFAULTS.dataRoot,
+    idleTimeoutMs: raw.idleTimeoutMs ?? DEFAULTS.idleTimeoutMs,
+    windowWidth: raw.windowWidth ?? DEFAULTS.windowWidth,
+    windowHeight: raw.windowHeight ?? DEFAULTS.windowHeight,
+    extraArgs: raw.extraArgs ?? DEFAULTS.extraArgs,
+    screencastFrameSkip: raw.screencastFrameSkip ?? DEFAULTS.screencastFrameSkip,
+    screencastQuality: raw.screencastQuality ?? DEFAULTS.screencastQuality,
+    maxSnapshotText: raw.maxSnapshotText ?? DEFAULTS.maxSnapshotText,
+    maxTabs: raw.maxTabs ?? DEFAULTS.maxTabs,
   }
 }

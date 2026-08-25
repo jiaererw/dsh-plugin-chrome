@@ -114,10 +114,13 @@ export function ChromeTab(props: ConvViewProps & ChromeTabProps): JSX.Element {
       image.onload = () => {
         if (closed || canvasRef.current !== canvas) return
         const scale = Math.min(1, (canvas.clientWidth || canvas.width) / Math.max(1, width))
-        canvas.width = Math.round(width * scale)
-        canvas.height = Math.round(height * scale)
+        const targetWidth = Math.max(1, Math.round(width * scale))
+        const targetHeight = Math.max(1, Math.round(height * scale))
+        // Resizing resets the bitmap and flickers; only resize on change.
+        if (canvas.width !== targetWidth) canvas.width = targetWidth
+        if (canvas.height !== targetHeight) canvas.height = targetHeight
         const context = canvas.getContext('2d')
-        context?.drawImage(image, 0, 0, canvas.width, canvas.height)
+        context?.drawImage(image, 0, 0, targetWidth, targetHeight)
       }
       image.src = `data:image/jpeg;base64,${data}`
     }
@@ -259,9 +262,9 @@ export function ChromeTab(props: ConvViewProps & ChromeTabProps): JSX.Element {
         <div className="dsh-chrome-tab__shots">
           {shots.length === 0 && <div className="dsh-chrome-tab__hint">—</div>}
           {shots.map((shot) => (
-            <button key={shot.name} className="dsh-chrome-tab__shot" onClick={() => setEnlarged(shot.name)} title={shot.name}>
-              <img src={`${API.screenshot}?sessionId=${encodeURIComponent(String(sessionId))}&name=${encodeURIComponent(shot.name)}`} alt={shot.name} loading="lazy" />
-              <div>{new Date(shot.createdAt).toLocaleString()}</div>
+            <button key={shot.name} className="dsh-chrome-tab__shot" onClick={() => setEnlarged(shot.name)} title={shot.url || shot.name}>
+              <img src={`${API.screenshot}?sessionId=${encodeURIComponent(String(sessionId))}&name=${encodeURIComponent(shot.name)}`} alt={shot.pageTitle || shot.name} loading="lazy" />
+              <div>{shot.pageTitle || new Date(shot.createdAt).toLocaleString()}</div>
             </button>
           ))}
         </div>

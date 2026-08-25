@@ -17,5 +17,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/host", "src/shared", "tests/host"]
+  "include": ["src/host", "src/shared", "tests"]
 }

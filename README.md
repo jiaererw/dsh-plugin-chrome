@@ -14,7 +14,7 @@
 - **Live view**: the Chrome tab in the Web GUI streams the window through Chrome screencast (smooth while pages are active). A screenshot heartbeat keeps idle pages from freezing (about one frame every 3 seconds).
 - **Complete agent tool suite** (16 tools): `chrome_open` / `chrome_status` / `chrome_close` / `chrome_navigate` / `chrome_tabs` / `chrome_snapshot` / `chrome_screenshot` / `chrome_click` / `chrome_click_at` / `chrome_fill` / `chrome_type` / `chrome_press_key` / `chrome_hover` / `chrome_scroll` / `chrome_evaluate` / `chrome_wait`.
 - **Accessibility-tree snapshots**: `chrome_snapshot` returns a compact a11y tree with stable element uids; clicks and fills target uids directly — far lighter than DOM dumps and robust against fragile selectors.
-- **Dual-channel screenshots**: `chrome_screenshot` sends the image into the model context (as an image block) AND saves it to the session's screenshot history shown in the panel.
+- **Dual-channel screenshots**: `chrome_screenshot` sends the image into the model context (as an image block) AND saves it to the session's screenshot history shown in the panel — history entries keep title/URL/size metadata across restarts.
 - **Security-minded**: CDP never exposes a fixed port; the Web API enforces same-origin checks and a sessionId whitelist; browser data is isolated per session.
 - **Resource governance**: idle windows auto-close (default 10 min, configurable), `chrome_close` closes explicitly, and plugin unload / host shutdown closes every window it opened.
 
@@ -73,7 +73,6 @@ Override the plugin row in the profile's `cordis.patch.yml` (config is replaced 
     screencastQuality: 70      # JPEG quality 1-100
     maxSnapshotText: 60000     # max chars per snapshot
     maxTabs: 16
-    autoScreenshot: false      # capture after every action
     extraArgs: ''              # extra Chrome launch flags
 ```
 
@@ -94,7 +93,7 @@ npm install
 npm run typecheck   # host + client programs
 npm test            # vitest unit tests
 npm run test:e2e    # real-Chrome end-to-end smoke (pops a visible window)
-npm run build       # lib/index.js (host) + lib/client.js (client bundle)
+npm run build       # lib/index.js + lib/index.d.ts (host), lib/client.js + lib/client.d.ts (client bundle)
 npm run watch       # continuous build; client changes hot-reload, host changes need a DSH restart
 ```
 
