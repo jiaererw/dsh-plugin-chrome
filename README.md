@@ -6,16 +6,29 @@
 |---|---|
 | ![browsing](assets/screenshot-1-bing.jpg) | ![douyin](assets/screenshot-2-douyin.jpg) |
 
+[![GitHub stars](https://img.shields.io/github/stars/jiaererw/dsh-plugin-chrome?style=flat-square)](https://github.com/jiaererw/dsh-plugin-chrome/stargazers)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+
 [中文文档](README.zh.md)
+
+## Contents
+
+- [Features](#features)
+- [Install](#install)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [FAQ](#faq)
+- [Development](#development)
+- [License](#license)
 
 ## Features
 
-- **A visible window per session**: every DSH session gets its own Chrome window (real window, not headless). Watch every agent action as it happens; the window uses an isolated user-data-dir, so it never mixes with your daily browser.
-- **Live view**: the Chrome tab in the Web GUI streams the window through Chrome screencast (smooth while pages are active). A screenshot heartbeat keeps idle pages from freezing (about one frame every 3 seconds).
-- **Complete agent tool suite** (16 tools): `chrome_open` / `chrome_status` / `chrome_close` / `chrome_navigate` / `chrome_tabs` / `chrome_snapshot` / `chrome_screenshot` / `chrome_click` / `chrome_click_at` / `chrome_fill` / `chrome_type` / `chrome_press_key` / `chrome_hover` / `chrome_scroll` / `chrome_evaluate` / `chrome_wait`.
+- **A visible window per session**: every DSH session gets its own Chrome window (a real window, not headless). Watch every agent action as it happens; the window uses an isolated user-data-dir, so it never mixes with your daily browser.
+- **Live view**: the Chrome tab in the Web GUI streams the window through Chrome screencast (smooth while pages are active). A screenshot heartbeat keeps idle pages from freezing — a forced frame about every 2 seconds once the stream has been silent for 3 seconds.
+- **Complete agent tool suite** (16 tools): `chrome_open` / `chrome_status` / `chrome_close` / `chrome_navigate` / `chrome_tabs` / `chrome_snapshot` / `chrome_screenshot` / `chrome_click` / `chrome_click_at` / `chrome_fill` / `chrome_type` / `chrome_press_key` / `chrome_hover` / `chrome_scroll` / `chrome_evaluate` / `chrome_wait`. `chrome_tabs` covers list / new / close / select, and snapshots, screenshots and clicks always act on the selected tab.
 - **Accessibility-tree snapshots**: `chrome_snapshot` returns a compact a11y tree with stable element uids; clicks and fills target uids directly — far lighter than DOM dumps and robust against fragile selectors.
-- **Dual-channel screenshots**: `chrome_screenshot` sends the image into the model context (as an image block) AND saves it to the session's screenshot history shown in the panel — history entries keep title/URL/size metadata across restarts.
-- **Security-minded**: CDP never exposes a fixed port; the Web API enforces same-origin checks and a sessionId whitelist; browser data is isolated per session.
+- **Dual-channel screenshots**: `chrome_screenshot` sends the image into the model context (as an image block) AND saves it to the session's screenshot history shown in the panel — history entries keep title/URL/size metadata across restarts. (Running a text-only model? See the FAQ.)
+- **Security-minded**: CDP never exposes a fixed port; the Web API rejects cross-site requests (Sec-Fetch-Site) and whitelist-validates sessionId; browser data is isolated per session.
 - **Resource governance**: idle windows auto-close (default 10 min, configurable), `chrome_close` closes explicitly, and plugin unload / host shutdown closes every window it opened.
 
 ## Install
@@ -32,6 +45,8 @@ npx -p @deepseek-ai/dsh dsh plugin --profile web add D:/harness/dsh-plugin-chrom
 
 Restart DSH after installing — a **Chrome** tab appears at the top of every conversation.
 
+> If your profile's `cordis.patch.yml` still carries an old manual mount line for `dsh-plugin-chrome` (from local development), remove it before installing through the CLI to avoid double-mounting.
+
 ## Usage
 
 ### For the agent (tools)
@@ -45,8 +60,8 @@ The agent will: `chrome_open` → `chrome_navigate` → `chrome_screenshot` (see
 ### For you (visualization)
 
 1. Open the **Chrome** tab at the top of the conversation:
-   - **Live view**: continuously shows the window. Native screencast frames flow while the page changes; a heartbeat fallback force-captures idle pages so the picture never freezes.
-   - **Tab management**: switch or close tabs from the side list, in sync with the real window.
+   - **Live view**: continuously shows the window. Native screencast frames flow while the page changes; a heartbeat fallback force-captures idle pages (about one frame every 2 seconds) so the picture never freezes.
+   - **Tab management**: create, switch or close tabs from the side list, in sync with the real window.
    - **Manual takeover**: click around in the Chrome window yourself at any time — the agent sees your changes on its next tool call.
 2. **Screenshot history**: every `chrome_screenshot` is stored in the panel; click a thumbnail to enlarge.
 
@@ -80,11 +95,13 @@ Data directory (browser profiles & screenshots): `~/.dsh/data/dsh-plugin-chrome/
 
 ## FAQ
 
-- **The Chrome tab shows nothing**: check the window is running (status dot at the top); the first launch takes a few seconds. Idle pages update roughly every 3 seconds via the heartbeat; activity raises the frame rate automatically.
+- **The Chrome tab shows nothing**: check the window is running (status dot at the top); the first launch takes a few seconds. Idle pages get a forced frame about every 2 seconds via the heartbeat (after 3 seconds without a real frame); activity raises the frame rate automatically.
 - **Agent says "unknown uid"**: the page changed — have it re-run `chrome_snapshot`.
 - **I closed the window myself**: the panel shows "window closed"; any next `chrome_*` call or the Open button relaunches it.
 - **Login state**: each session uses an isolated profile, so logins don't carry over from your daily browser — that's by design. To log in somewhere, let the agent complete the login (it persists for the session).
 - **Chrome stays open after DSH is killed**: the orphan window is adopted on the next session call (or close it by hand); a clean DSH shutdown closes its windows.
+- **Screenshots stop a text-only model from responding**: `chrome_screenshot` delivers the picture as an image block into the conversation history. If the session's model does not accept images, every following turn is rejected with `UNSUPPORTED_CONTENT: does not accept image input` and the session no longer responds — retrying doesn't help. Use a vision-capable model for sessions that screenshot, or avoid `chrome_screenshot` there.
+- **Install blocked by pnpm (strict-dep-builds)**: add `dsh-plugin-chrome: true` to `allowBuilds` in the profile's `pnpm-workspace.yaml` and retry the install.
 
 ## Development
 
