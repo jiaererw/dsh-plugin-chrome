@@ -115,7 +115,7 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
       for (const socket of sockets) {
         if (socket.readyState === WebSocket.OPEN) socket.send(data)
       }
-    })
+    }).catch(() => {})
   }
 
   /** Debounced status fan-out: event bursts collapse into one push. */
@@ -332,12 +332,12 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
         if (socket.readyState !== WebSocket.OPEN) return
         const welcome: HostWsMessage = { type: 'welcome', status }
         socket.send(JSON.stringify(welcome))
-      })
+      }).catch(() => {})
     }
     void manager.getOrLaunch(sessionId).then((launched) => {
       wire(launched)
       void launched.addScreencastWatcher(token).catch(() => {})
-    })
+    }).catch(() => {})
     socket.on('message', (raw) => {
       let message: ClientWsMessage
       try {
@@ -354,7 +354,9 @@ export function installApi(webCtx: Context, manager: ChromeManager): () => void 
       set.delete(socket)
       if (set.size === 0) viewers.delete(sessionId)
       const live = manager.get(sessionId)
-      if (live !== undefined) void live.removeScreencastWatcher(token)
+      // Detaching can reject when the window is already gone; an unhandled
+      // rejection here would take the whole host process down with it.
+      if (live !== undefined) void live.removeScreencastWatcher(token).catch(() => {})
     })
     socket.on('error', () => { /* close handler owns cleanup */ })
   })

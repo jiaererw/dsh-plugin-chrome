@@ -336,7 +336,7 @@ export class SessionChrome {
     this.lastFrameAt = Date.now()
     if (this.heartbeatTimer !== null) return
     this.heartbeatTimer = setInterval(() => {
-      void this.heartbeatCapture()
+      void this.heartbeatCapture().catch(() => {})
     }, FRAME_HEARTBEAT_MS)
     this.heartbeatTimer.unref?.()
   }
@@ -349,9 +349,9 @@ export class SessionChrome {
   private async heartbeatCapture(): Promise<void> {
     if (this.hasScreencastWatchers() === false || this.exited) return
     if (Date.now() - this.lastFrameAt < FRAME_STALL_MS) return
-    const page = await this.selected()
-    if (page === undefined) return
     try {
+      const page = await this.selected()
+      if (page === undefined) return
       const { buffer, width, height } = await captureScreenshot(page, { fullPage: false, format: 'jpeg', quality: 55 })
       this.screencastSeq += 1
       this.lastFrameAt = Date.now()
