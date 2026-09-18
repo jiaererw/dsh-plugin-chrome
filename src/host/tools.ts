@@ -328,6 +328,14 @@ function screenshotTool(deps: ToolDeps): ReturnType<typeof defineTool> {
               width: { type: 'integer', required: true },
               height: { type: 'integer', required: true },
               name: { type: 'string' },
+              originalDimensions: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  width: { type: 'integer', required: true },
+                  height: { type: 'integer', required: true },
+                },
+              },
             },
           },
         },
